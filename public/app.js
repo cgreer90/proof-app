@@ -253,6 +253,93 @@ function proofAsText() {
   return lines.join("\n").trim() + "\n";
 }
 
+// ---------- Word export ----------
+// The docx library loads only when someone downloads, so the page stays fast.
+const DOCX_URL = "https://cdn.jsdelivr.net/npm/docx@9.5.1/dist/index.iife.js";
+let docxPromise = null;
+function loadDocx() {
+  if (window.docx) return Promise.resolve(window.docx);
+  docxPromise ??= new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = DOCX_URL;
+    s.onload = () => (window.docx ? resolve(window.docx) : reject(new Error("docx missing")));
+    s.onerror = () => { docxPromise = null; reject(new Error("docx failed to load")); };
+    document.head.append(s);
+  });
+  return docxPromise;
+}
+
+function proofParts() {
+  const c = chosen();
+  const gaps = (c.missing || []).filter((q) => state.gapAnswers[q]?.trim())
+    .map((q) => ({ heading: q, text: state.gapAnswers[q].trim() }));
+  return {
+    title: `Proof from my past work: ${state.answers[0].trim().replace(/[.!]+$/, "") || "one piece of work"}`,
+    skill: c.ux_skill_label,
+    format: FORMAT_LABELS[c.could_become] || "",
+    quote: `“${c.quote}”`,
+    why: (state.edits[c.id] ?? c.why_it_matters).trim(),
+    gaps,
+  };
+}
+
+async function proofAsDocx() {
+  const d = await loadDocx();
+  const p = proofParts();
+  const INK = "1D2B4F";
+  const paras = (text) => text.split(/\n+/).filter((t) => t.trim())
+    .map((t) => new d.Paragraph({ children: [new d.TextRun(t.trim())] }));
+  const heading = (t, level = d.HeadingLevel.HEADING_1) => new d.Paragraph({ heading: level, children: [new d.TextRun(t)] });
+
+  const children = [
+    new d.Paragraph({ heading: d.HeadingLevel.TITLE, children: [new d.TextRun(p.title)] }),
+    new d.Paragraph({ children: [new d.TextRun({ text: "Skill it shows: ", bold: true }), new d.TextRun(p.skill)] }),
+    new d.Paragraph({
+      spacing: { before: 240, after: 240 },
+      indent: { left: 240 },
+      border: { left: { style: d.BorderStyle.SINGLE, size: 24, color: "C9D23A", space: 10 } },
+      shading: { type: d.ShadingType.CLEAR, color: "auto", fill: "F6F8C8" },
+      children: [new d.TextRun({ text: p.quote, italics: true, size: 26, font: "Georgia" })],
+    }),
+    heading("Why it matters"),
+    ...paras(p.why),
+  ];
+  if (p.format) children.push(new d.Paragraph({ children: [new d.TextRun({ text: p.format, italics: true, color: "545E74" })] }));
+  if (p.gaps.length) {
+    children.push(heading("More detail"));
+    for (const g of p.gaps) children.push(heading(g.heading, d.HeadingLevel.HEADING_2), ...paras(g.text));
+  }
+
+  const doc = new d.Document({
+    creator: "Proof from past work",
+    title: p.title,
+    styles: {
+      default: { document: { run: { font: "Arial", size: 22, color: "222222" }, paragraph: { spacing: { after: 120, line: 300 } } } },
+      paragraphStyles: [
+        { id: "Title", name: "Title", basedOn: "Normal", next: "Normal", quickFormat: true,
+          run: { font: "Arial", size: 40, bold: true, color: INK },
+          paragraph: { spacing: { before: 0, after: 200 }, keepNext: true } },
+        { id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
+          run: { font: "Arial", size: 28, bold: true, color: INK },
+          paragraph: { spacing: { before: 320, after: 100 }, keepNext: true, outlineLevel: 0 } },
+        { id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
+          run: { font: "Arial", size: 23, bold: true, color: INK },
+          paragraph: { spacing: { before: 200, after: 60 }, keepNext: true, outlineLevel: 1 } },
+      ],
+    },
+    sections: [{
+      properties: { page: { size: { width: 12240, height: 15840 }, margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } },
+      children,
+    }],
+  });
+  return d.Packer.toBlob(doc);
+}
+
+function fileSlug() {
+  const base = (state.answers[0] || "my-proof").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  return `${base || "my-proof"}.docx`;
+}
+
 function renderResult() {
   const c = chosen();
   const status = h("p", { class: "status-msg", role: "status" });
@@ -285,7 +372,7 @@ function renderResult() {
 
   show([
     h("h2", {}, "Your proof"),
-    h("p", {}, "This is yours to keep. Fill in what only you know, then copy or download it."),
+    h("p", {}, "This is yours to keep. Fill in what only you know, then copy it or download it as a Word file."),
     h("article", { class: "proof" },
       h("p", { class: "skill" }, c.ux_skill_label),
       h("p", { class: "voice" }, h("mark", {}, `“${c.quote}”`)),
@@ -301,13 +388,21 @@ function renderResult() {
           try { await navigator.clipboard.writeText(proofAsText()); status.textContent = "Copied. Paste it into your portfolio notes."; }
           catch { status.textContent = "Copy didn’t work in this browser. Use Download instead."; }
         } }, "Copy as text"),
-      h("button", { onclick: () => {
-          const blob = new Blob([proofAsText()], { type: "text/plain" });
-          const a = h("a", { href: URL.createObjectURL(blob), download: "my-proof.txt" });
-          document.body.append(a); a.click(); a.remove();
-          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-          status.textContent = "Downloaded my-proof.txt.";
-        } }, "Download as text file")),
+      h("button", { onclick: async (ev) => {
+          const btn = ev.currentTarget;
+          btn.disabled = true;
+          status.textContent = "Preparing your Word file…";
+          try {
+            const blob = await proofAsDocx();
+            const filename = fileSlug();
+            const a = h("a", { href: URL.createObjectURL(blob), download: filename });
+            document.body.append(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+            status.textContent = `Downloaded ${filename}. It opens in Word, Google Docs and Pages.`;
+          } catch {
+            status.textContent = "The Word file couldn’t be made right now. Use Copy instead, or try again.";
+          } finally { btn.disabled = false; }
+        } }, "Download Word file (.docx)")),
     status,
     h("div", { class: "actions" },
       h("button", { class: "quiet", onclick: renderProof }, "Choose a different part"),
