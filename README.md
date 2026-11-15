@@ -5,7 +5,7 @@ proof an employer can judge, using only their own words.
 
 Flow: Welcome → Step 1 Describe your work (five questions) → Step 2 Proof
 candidates (use / edit wording / not accurate) → Step 3 Your proof (fill
-gaps, privacy check, copy or download).
+gaps, privacy check, copy as text or download as a Word file).
 
 ## How the "AI help" works
 
@@ -35,6 +35,8 @@ tests/                    Offline tests + live AI tests
 ```
 
 No framework and no build step, so anyone on the team can read and edit it.
+The Word download uses the `docx` library (pinned to 9.5.1), loaded from
+jsDelivr only when someone clicks Download.
 
 ## Run it on your computer
 
